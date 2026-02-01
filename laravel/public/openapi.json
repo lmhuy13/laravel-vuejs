@@ -1,0 +1,321 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "Laravel Vue Admin API",
+    "version": "1.0.0",
+    "description": "Complete API documentation for Laravel Vue Admin Application",
+    "contact": {
+      "name": "Support",
+      "email": "support@example.com"
+    },
+    "license": {
+      "name": "MIT"
+    }
+  },
+  "servers": [
+    {
+      "url": "/api",
+      "description": "API Server"
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "sanctumAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Laravel Sanctum token"
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "Authentication",
+      "description": "Authentication endpoints"
+    },
+    {
+      "name": "Users",
+      "description": "User management endpoints"
+    },
+    {
+      "name": "Teams",
+      "description": "Team management endpoints"
+    },
+    {
+      "name": "Roles",
+      "description": "Role management endpoints"
+    }
+  ],
+  "paths": {
+    "/login": {
+      "post": {
+        "summary": "Login user",
+        "tags": ["Authentication"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "required": ["email", "password"],
+                "properties": {
+                  "email": {
+                    "type": "string",
+                    "format": "email",
+                    "example": "admin@example.com"
+                  },
+                  "password": {
+                    "type": "string",
+                    "format": "password",
+                    "example": "password123"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Login successful",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    },
+                    "token": {
+                      "type": "string"
+                    },
+                    "user": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid credentials"
+          }
+        }
+      }
+    },
+    "/me": {
+      "get": {
+        "summary": "Get authenticated user",
+        "tags": ["Authentication"],
+        "security": [{"sanctumAuth": []}],
+        "responses": {
+          "200": {
+            "description": "User data",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "id": {"type": "integer"},
+                    "name": {"type": "string"},
+                    "email": {"type": "string"},
+                    "team_id": {"type": "integer"},
+                    "status": {"type": "string"},
+                    "roles": {"type": "array"}
+                  }
+                }
+              }
+            }
+          },
+          "401": {"description": "Unauthorized"}
+        }
+      }
+    },
+    "/logout": {
+      "post": {
+        "summary": "Logout user",
+        "tags": ["Authentication"],
+        "security": [{"sanctumAuth": []}],
+        "responses": {
+          "200": {
+            "description": "Logout successful",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "message": {"type": "string"}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/users": {
+      "get": {
+        "summary": "Get paginated users with filters",
+        "tags": ["Users"],
+        "security": [{"sanctumAuth": []}],
+        "parameters": [
+          {"name": "page", "in": "query", "schema": {"type": "integer", "default": 1}},
+          {"name": "per_page", "in": "query", "schema": {"type": "integer", "default": 15}},
+          {"name": "search", "in": "query", "schema": {"type": "string"}},
+          {"name": "team_id", "in": "query", "schema": {"type": "integer"}},
+          {"name": "sort_by", "in": "query", "schema": {"type": "string", "default": "name"}},
+          {"name": "sort_dir", "in": "query", "schema": {"type": "string", "default": "asc"}}
+        ],
+        "responses": {
+          "200": {"description": "Paginated users list"},
+          "401": {"description": "Unauthorized"}
+        }
+      },
+      "post": {
+        "summary": "Create new user",
+        "tags": ["Users"],
+        "security": [{"sanctumAuth": []}],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "required": ["name", "email", "password"],
+                "properties": {
+                  "name": {"type": "string"},
+                  "email": {"type": "string"},
+                  "password": {"type": "string"}
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {"description": "User created"},
+          "401": {"description": "Unauthorized"}
+        }
+      }
+    },
+    "/admin/users/{id}": {
+      "get": {
+        "summary": "Get user by ID",
+        "tags": ["Users"],
+        "security": [{"sanctumAuth": []}],
+        "parameters": [
+          {"name": "id", "in": "path", "required": true, "schema": {"type": "integer"}}
+        ],
+        "responses": {
+          "200": {"description": "User data"},
+          "404": {"description": "User not found"}
+        }
+      },
+      "put": {
+        "summary": "Update user",
+        "tags": ["Users"],
+        "security": [{"sanctumAuth": []}],
+        "parameters": [
+          {"name": "id", "in": "path", "required": true, "schema": {"type": "integer"}}
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "name": {"type": "string"},
+                  "email": {"type": "string"},
+                  "team_id": {"type": "integer"}
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {"description": "User updated"}
+        }
+      },
+      "delete": {
+        "summary": "Soft delete user",
+        "tags": ["Users"],
+        "security": [{"sanctumAuth": []}],
+        "parameters": [
+          {"name": "id", "in": "path", "required": true, "schema": {"type": "integer"}}
+        ],
+        "responses": {
+          "204": {"description": "User deleted"}
+        }
+      }
+    },
+    "/admin/teams": {
+      "get": {
+        "summary": "Get paginated teams",
+        "tags": ["Teams"],
+        "security": [{"sanctumAuth": []}],
+        "parameters": [
+          {"name": "page", "in": "query", "schema": {"type": "integer"}},
+          {"name": "search", "in": "query", "schema": {"type": "string"}}
+        ],
+        "responses": {
+          "200": {"description": "Paginated teams list"},
+          "401": {"description": "Unauthorized"}
+        }
+      },
+      "post": {
+        "summary": "Create new team",
+        "tags": ["Teams"],
+        "security": [{"sanctumAuth": []}],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "required": ["name"],
+                "properties": {
+                  "name": {"type": "string"},
+                  "description": {"type": "string"}
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {"description": "Team created"},
+          "401": {"description": "Unauthorized"}
+        }
+      }
+    },
+    "/admin/roles": {
+      "get": {
+        "summary": "Get paginated roles",
+        "tags": ["Roles"],
+        "security": [{"sanctumAuth": []}],
+        "parameters": [
+          {"name": "page", "in": "query", "schema": {"type": "integer"}},
+          {"name": "search", "in": "query", "schema": {"type": "string"}}
+        ],
+        "responses": {
+          "200": {"description": "Paginated roles list"},
+          "401": {"description": "Unauthorized"}
+        }
+      },
+      "post": {
+        "summary": "Create new role",
+        "tags": ["Roles"],
+        "security": [{"sanctumAuth": []}],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "required": ["name", "slug"],
+                "properties": {
+                  "name": {"type": "string"},
+                  "slug": {"type": "string"},
+                  "description": {"type": "string"},
+                  "is_active": {"type": "boolean"}
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {"description": "Role created"},
+          "401": {"description": "Unauthorized"}
+        }
+      }
+    }
+  }
+}

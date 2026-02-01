@@ -1,0 +1,53 @@
+FROM php:8.2-fpm-alpine AS php-base
+
+WORKDIR /app
+
+# Install minimal system dependencies
+RUN apk add --no-cache \
+    bash \
+    curl \
+    postgresql-client \
+    libzip-dev \
+    oniguruma-dev
+
+# Install only essential PHP extensions
+RUN docker-php-ext-install \
+    pdo_pgsql \
+    pdo \
+    zip
+
+# Install composer
+COPY --from=composer:latest /usr/bin/composer /usr/bin/composer
+
+# Install Node.js
+RUN apk add --no-cache nodejs npm
+
+# Only copy package files
+COPY composer.json* ./
+COPY package*.json ./
+
+# Install dependencies with reduced verbosity
+RUN composer install --no-scripts --no-interaction --prefer-dist --no-dev 2>&1 | tail -20 || true
+RUN npm install --no-fund --legacy-peer-deps --production 2>&1 | tail -20 || true
+
+FROM php-base AS app
+
+EXPOSE 8000
+ENTRYPOINT ["/bin/bash"]
+CMD ["/app/docker/setup.sh"]
+
+FROM php-base AS supervisor
+
+RUN apk add --no-cache supervisor && mkdir -p /var/log/supervisor /etc/supervisor/conf.d
+USER root
+CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/supervisord.conf"]
+
+FROM node:16-alpine AS vite
+
+WORKDIR /app
+COPY package*.json ./
+RUN npm install --no-fund --legacy-peer-deps --production 2>&1 | tail -20 || true
+EXPOSE 5173
+ENV VITE_HOST=0.0.0.0
+ENV VITE_PORT=5173
+CMD ["npm", "run", "dev"]
