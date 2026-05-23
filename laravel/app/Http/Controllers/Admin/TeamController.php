@@ -19,7 +19,7 @@ class TeamController extends Controller
      */
     public function index(Request $request): JsonResponse
     {
-        $per_page = $request->get('per_page', 15);
+        $perPage = $request->get('per_page', 15);
         $search = $request->get('search', '');
 
         $query = Team::with(['users' => function ($q) {
@@ -31,7 +31,7 @@ class TeamController extends Controller
                   ->orWhere('slug', 'like', "%{$search}%");
         }
 
-        $teams = $query->paginate($per_page);
+        $teams = $query->paginate($perPage);
 
         return response()->json([
             'success' => true,

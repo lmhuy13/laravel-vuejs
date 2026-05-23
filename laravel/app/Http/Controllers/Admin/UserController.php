@@ -3,19 +3,15 @@
 namespace App\Http\Controllers\Admin;
 
 use App\Http\Controllers\Controller;
-use App\Models\User;
-use App\Models\Team;
-use App\Models\Role;
-use App\Models\Profile;
 use App\Services\UserService;
-use App\Jobs\SendWelcomeEmailJob;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\DB;
 
 class UserController extends Controller
 {
-    protected $userService;
+    protected UserService $userService;
 
     public function __construct(UserService $userService)
     {
@@ -51,20 +47,15 @@ class UserController extends Controller
     public function show($id): JsonResponse
     {
         $cacheKey = "user_roles_{$id}";
-        
-        // Try to get cached timestamp first
         $cachedTime = Cache::get($cacheKey);
         $cacheHit = $cachedTime !== null;
-        
+
         \Log::info("🔍 Attempting to fetch user {$id} with cache key {$cacheKey}, cache hit: " . ($cacheHit ? 'YES' : 'NO'));
-        
+
+        $user = $this->userService->getUserDetails($id);
+
         if (!$cacheHit) {
-            // Not in cache, fetch from database
-            $user = User::with(['team', 'roles', 'profile', 'userRoles'])->findOrFail($id);
-            
-            // Cache only the timestamp (1 hour = 3600 seconds)
             Cache::put($cacheKey, now()->timestamp, 3600);
-            
             \Log::info("⚠️ Cache MISS for user {$id}. Fetched from database and timestamp cached.", [
                 'user_id' => $id,
                 'cache_key' => $cacheKey,
@@ -72,9 +63,6 @@ class UserController extends Controller
                 'roles_count' => count($user->roles),
             ]);
         } else {
-            // Load fresh data from database (but know it came from cache)
-            $user = User::with(['team', 'roles', 'profile', 'userRoles'])->findOrFail($id);
-            
             \Log::info("✓ Cache HIT for user {$id}. Data validity confirmed from Redis cache.", [
                 'user_id' => $id,
                 'cache_key' => $cacheKey,
@@ -109,39 +97,25 @@ class UserController extends Controller
             'roles' => 'array',
         ]);
 
-        $user = User::create([
-            'name' => $validated['name'],
-            'email' => $validated['email'],
-            'password' => bcrypt($validated['password']),
-            'team_id' => $validated['team_id'],
-            'is_active' => $validated['is_active'] ?? true,
-        ]);
+        DB::beginTransaction();
+        try {
+            $user = $this->userService->createUserWithRelations($validated);
 
-        // Create profile
-        if (isset($validated['profile'])) {
-            $user->profile()->create($validated['profile']);
-        } else {
-            $user->profile()->create([]);
+            DB::commit();
+
+            return response()->json([
+                'success' => true,
+                'message' => 'User created successfully. Welcome email sent.',
+                'data' => $user,
+            ], 201);
+        } catch (\Exception $e) {
+            DB::rollBack();
+            \Log::error("Error creating user: " . $e->getMessage(), ['exception' => $e]);
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to create user. Please try again.',
+            ], 500);
         }
-
-        // Assign roles
-        if (isset($validated['roles']) && !empty($validated['roles'])) {
-            foreach ($validated['roles'] as $role_id) {
-                $user->userRoles()->create([
-                    'role_id' => $role_id,
-                    'team_id' => $validated['team_id'],
-                ]);
-            }
-        }
-
-        // Dispatch welcome email job to queue
-        SendWelcomeEmailJob::dispatch($user, $validated['password']);
-
-        return response()->json([
-            'success' => true,
-            'message' => 'User created successfully. Welcome email sent.',
-            'data' => $user->load(['team', 'roles', 'profile']),
-        ], 201);
     }
 
     /**
@@ -149,8 +123,6 @@ class UserController extends Controller
      */
     public function update(Request $request, $id): JsonResponse
     {
-        $user = User::findOrFail($id);
-
         $validated = $request->validate([
             'name' => 'string|max:255',
             'email' => 'email|unique:users,email,' . $id,
@@ -161,54 +133,24 @@ class UserController extends Controller
             'roles' => 'array',
         ]);
 
-        // Update basic user info
-        if (isset($validated['name'])) {
-            $user->name = $validated['name'];
-        }
-        if (isset($validated['email'])) {
-            $user->email = $validated['email'];
-        }
-        if (isset($validated['team_id'])) {
-            $user->team_id = $validated['team_id'];
-        }
-        if (isset($validated['is_active'])) {
-            $user->is_active = $validated['is_active'];
-        }
-        if (isset($validated['password'])) {
-            $user->password = bcrypt($validated['password']);
-        }
+        DB::beginTransaction();
+        try {
+            $user = $this->userService->updateUserWithRelations($id, $validated);
 
-        $user->save();
-
-        // Update profile
-        if (isset($validated['profile'])) {
-            $user->profile()->updateOrCreate(
-                ['user_id' => $user->id],
-                $validated['profile']
-            );
-        }
-
-        // Update roles
-        if (isset($validated['roles'])) {
-            $user->userRoles()->delete();
-            $team_id = $user->team_id;
-
-            foreach ($validated['roles'] as $role_id) {
-                $user->userRoles()->create([
-                    'role_id' => $role_id,
-                    'team_id' => $team_id,
-                ]);
-            }
-        }
-
-        // Invalidate cache
         Cache::forget("user_roles_{$id}");
 
         return response()->json([
             'success' => true,
             'message' => 'User updated successfully',
-            'data' => $user->load(['team', 'roles', 'profile']),
+            'data' => $user,
         ]);
+        } catch (\Exception $e) {
+            \Log::error("Error updating user {$id}: " . $e->getMessage(), ['exception' => $e]);
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to update user. Please try again.',
+            ], 500);
+        }
     }
 
     /**
@@ -216,25 +158,25 @@ class UserController extends Controller
      */
     public function destroy($id): JsonResponse
     {
-        $user = User::findOrFail($id);
+        DB::beginTransaction();
+        try {
+            $this->userService->deleteUser($id);
+            Cache::forget("user_roles_{$id}");
+            DB::commit();
 
-        // Prevent deleting super admin (optional)
-        if ($user->roles()->where('slug', 'super-admin')->exists()) {
+            return response()->json([
+                'success' => true,
+                'message' => 'User deleted successfully',
+            ]);
+        } catch (\Exception $e) {
+            DB::rollBack();
+            \Log::error("Error deleting user {$id}: " . $e->getMessage(), ['exception' => $e]);
             return response()->json([
                 'success' => false,
-                'message' => 'Cannot delete super admin user',
-            ], 403);
+                'message' => 'Failed to delete user. Please try again.',
+            ], 500);
         }
 
-        $user->delete();
-
-        // Invalidate cache
-        Cache::forget("user_roles_{$id}");
-
-        return response()->json([
-            'success' => true,
-            'message' => 'User deleted successfully',
-        ]);
     }
 
     /**
@@ -242,21 +184,12 @@ class UserController extends Controller
      */
     public function restore($id): JsonResponse
     {
-        $user = User::withTrashed()->findOrFail($id);
-
-        if (!$user->trashed()) {
-            return response()->json([
-                'success' => false,
-                'message' => 'User is not deleted',
-            ], 400);
-        }
-
-        $user->restore();
+        $user = $this->userService->restoreUser($id);
 
         return response()->json([
             'success' => true,
             'message' => 'User restored successfully',
-            'data' => $user->load(['team', 'roles', 'profile']),
+            'data' => $user,
         ]);
     }
 
@@ -265,8 +198,7 @@ class UserController extends Controller
      */
     public function forceDelete($id): JsonResponse
     {
-        $user = User::withTrashed()->findOrFail($id);
-        $user->forceDelete();
+        $this->userService->forceDeleteUser($id);
 
         return response()->json([
             'success' => true,
@@ -279,9 +211,7 @@ class UserController extends Controller
      */
     public function activate($id): JsonResponse
     {
-        $user = User::findOrFail($id);
-        $user->is_active = true;
-        $user->save();
+        $user = $this->userService->activateUser($id);
 
         return response()->json([
             'success' => true,
@@ -295,9 +225,7 @@ class UserController extends Controller
      */
     public function deactivate($id): JsonResponse
     {
-        $user = User::findOrFail($id);
-        $user->is_active = false;
-        $user->save();
+        $user = $this->userService->deactivateUser($id);
 
         return response()->json([
             'success' => true,
