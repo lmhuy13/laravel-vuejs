@@ -12,6 +12,7 @@ use App\Jobs\SendWelcomeEmailJob;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\DB;
 
 class UserController extends Controller
 {
@@ -161,54 +162,53 @@ class UserController extends Controller
             'roles' => 'array',
         ]);
 
-        // Update basic user info
-        if (isset($validated['name'])) {
+        DB::beginTransaction();
+        try {
+            // Update basic user info
             $user->name = $validated['name'];
-        }
-        if (isset($validated['email'])) {
             $user->email = $validated['email'];
-        }
-        if (isset($validated['team_id'])) {
             $user->team_id = $validated['team_id'];
-        }
-        if (isset($validated['is_active'])) {
             $user->is_active = $validated['is_active'];
-        }
-        if (isset($validated['password'])) {
             $user->password = bcrypt($validated['password']);
-        }
+            $user->save();
 
-        $user->save();
-
-        // Update profile
-        if (isset($validated['profile'])) {
-            $user->profile()->updateOrCreate(
-                ['user_id' => $user->id],
-                $validated['profile']
-            );
-        }
-
-        // Update roles
-        if (isset($validated['roles'])) {
-            $user->userRoles()->delete();
-            $team_id = $user->team_id;
-
-            foreach ($validated['roles'] as $role_id) {
-                $user->userRoles()->create([
-                    'role_id' => $role_id,
-                    'team_id' => $team_id,
-                ]);
+            // Update profile
+            if (isset($validated['profile'])) {
+                $user->profile()->updateOrCreate(
+                    ['user_id' => $user->id],
+                    $validated['profile']
+                );
             }
+
+            // Update roles
+            if (isset($validated['roles'])) {
+                $user->userRoles()->delete();
+                $team_id = $user->team_id;
+
+                foreach ($validated['roles'] as $role_id) {
+                    $user->userRoles()->create([
+                        'role_id' => $role_id,
+                        'team_id' => $team_id,
+                    ]);
+                }
+            }
+
+            // Invalidate cache
+            Cache::forget("user_roles_{$id}");
+
+            return response()->json([
+                'success' => true,
+                'message' => 'User updated successfully',
+                'data' => $user->load(['team', 'roles', 'profile']),
+            ]);
+        } catch (\Exception $e) {
+            DB::rollBack();
+            \Log::error("Error updating user {$id}: " . $e->getMessage());
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to update user',
+            ], 500);
         }
-
-        // Invalidate cache
-        Cache::forget("user_roles_{$id}");
-
-        return response()->json([
-            'success' => true,
-            'message' => 'User updated successfully',
-            'data' => $user->load(['team', 'roles', 'profile']),
-        ]);
     }
 
     /**
@@ -216,25 +216,35 @@ class UserController extends Controller
      */
     public function destroy($id): JsonResponse
     {
-        $user = User::findOrFail($id);
+        DB::beginTransaction();
+        try {
+            $user = User::findOrFail($id);
 
-        // Prevent deleting super admin (optional)
-        if ($user->roles()->where('slug', 'super-admin')->exists()) {
+            // Prevent deleting super admin (optional)
+            if ($user->roles()->where('slug', 'super-admin')->exists()) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Cannot delete super admin user',
+                ], 403);
+            }
+
+            $user->delete();
+
+            // Invalidate cache
+            Cache::forget("user_roles_{$id}");
+
+            return response()->json([
+                'success' => true,
+                'message' => 'User deleted successfully',
+            ]);
+        } catch (\Exception $e) {
+            DB::rollBack();
+            \Log::error("Error deleting user {$id}: " . $e->getMessage());
             return response()->json([
                 'success' => false,
-                'message' => 'Cannot delete super admin user',
-            ], 403);
+                'message' => 'Failed to delete user',
+            ], 500);
         }
-
-        $user->delete();
-
-        // Invalidate cache
-        Cache::forget("user_roles_{$id}");
-
-        return response()->json([
-            'success' => true,
-            'message' => 'User deleted successfully',
-        ]);
     }
 
     /**
@@ -242,22 +252,32 @@ class UserController extends Controller
      */
     public function restore($id): JsonResponse
     {
-        $user = User::withTrashed()->findOrFail($id);
+        DB::beginTransaction();
+        try {
+            $user = User::withTrashed()->findOrFail($id);
 
-        if (!$user->trashed()) {
+            if (!$user->trashed()) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'User is not deleted',
+                ], 400);
+            }
+
+            $user->restore();
+
+            return response()->json([
+                'success' => true,
+                'message' => 'User restored successfully',
+                'data' => $user->load(['team', 'roles', 'profile']),
+            ]);
+        } catch (\Exception $e) {
+            DB::rollBack();
+            \Log::error("Error restoring user {$id}: " . $e->getMessage());
             return response()->json([
                 'success' => false,
-                'message' => 'User is not deleted',
-            ], 400);
+                'message' => 'Failed to restore user',
+            ], 500);
         }
-
-        $user->restore();
-
-        return response()->json([
-            'success' => true,
-            'message' => 'User restored successfully',
-            'data' => $user->load(['team', 'roles', 'profile']),
-        ]);
     }
 
     /**
@@ -265,13 +285,33 @@ class UserController extends Controller
      */
     public function forceDelete($id): JsonResponse
     {
-        $user = User::withTrashed()->findOrFail($id);
-        $user->forceDelete();
+        try {
+            $user = User::withTrashed()->findOrFail($id);
 
-        return response()->json([
-            'success' => true,
-            'message' => 'User permanently deleted',
-        ]);
+            // Prevent force deleting super admin (optional)
+            if ($user->roles()->where('slug', 'super-admin')->exists()) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Cannot permanently delete super admin user',
+                ], 403);
+            }
+
+            $user->forceDelete();
+
+            // Invalidate cache
+            Cache::forget("user_roles_{$id}");
+
+            return response()->json([
+                'success' => true,
+                'message' => 'User permanently deleted',
+            ]);
+        } catch (\Exception $e) {
+            \Log::error("Error force deleting user {$id}: " . $e->getMessage());
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to permanently delete user',
+            ], 500);
+        }
     }
 
     /**
@@ -279,15 +319,25 @@ class UserController extends Controller
      */
     public function activate($id): JsonResponse
     {
-        $user = User::findOrFail($id);
-        $user->is_active = true;
-        $user->save();
+        DB::beginTransaction();
+        try {
+            $user = User::findOrFail($id);
+            $user->is_active = true;
+            $user->save();
 
-        return response()->json([
-            'success' => true,
-            'message' => 'User activated',
-            'data' => $user,
-        ]);
+            return response()->json([
+                'success' => true,
+                'message' => 'User activated',
+                'data' => $user,
+            ]);
+        } catch (\Exception $e) {
+            DB::rollBack();
+            \Log::error("Error activating user {$id}: " . $e->getMessage());
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to activate user',
+            ], 500);
+        }
     }
 
     /**
@@ -295,14 +345,26 @@ class UserController extends Controller
      */
     public function deactivate($id): JsonResponse
     {
-        $user = User::findOrFail($id);
-        $user->is_active = false;
-        $user->save();
+        DB::beginTransaction();
+        try {
+            $user = User::findOrFail($id);
+            $user->is_active = false;
+            $user->save();
 
-        return response()->json([
-            'success' => true,
-            'message' => 'User deactivated',
-            'data' => $user,
-        ]);
+            DB::commit();
+
+            return response()->json([
+                'success' => true,
+                'message' => 'User deactivated',
+                'data' => $user,
+            ]);
+        } catch (\Exception $e) {
+            DB::rollBack();
+            \Log::error("Error deactivating user {$id}: " . $e->getMessage());
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to deactivate user',
+            ], 500);
+        }
     }
 }

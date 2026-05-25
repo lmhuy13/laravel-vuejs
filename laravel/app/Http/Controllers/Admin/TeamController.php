@@ -4,8 +4,10 @@ namespace App\Http\Controllers\Admin;
 
 use App\Http\Controllers\Controller;
 use App\Models\Team;
+use App\Models\UserRole;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Support\Facades\DB;
 
 class TeamController extends Controller
 {
@@ -19,7 +21,7 @@ class TeamController extends Controller
      */
     public function index(Request $request): JsonResponse
     {
-        $per_page = $request->get('per_page', 15);
+        $perPage = $request->get('per_page', 15);
         $search = $request->get('search', '');
 
         $query = Team::with(['users' => function ($q) {
@@ -31,7 +33,7 @@ class TeamController extends Controller
                   ->orWhere('slug', 'like', "%{$search}%");
         }
 
-        $teams = $query->paginate($per_page);
+        $teams = $query->paginate($perPage);
 
         return response()->json([
             'success' => true,
@@ -65,19 +67,29 @@ class TeamController extends Controller
             'is_active' => 'boolean',
         ]);
 
-        $team = Team::create([
-            'name' => $validated['name'],
-            'slug' => $validated['slug'],
-            'description' => $validated['description'] ?? null,
-            'logo' => $validated['logo'] ?? null,
-            'is_active' => $validated['is_active'] ?? true,
-        ]);
+        DB::beginTransaction();
+        try {
+            $team = Team::create([
+                'name' => $validated['name'],
+                'slug' => $validated['slug'],
+                'description' => $validated['description'] ?? null,
+                'logo' => $validated['logo'] ?? null,
+                'is_active' => $validated['is_active'] ?? true,
+            ]);
 
-        return response()->json([
-            'success' => true,
-            'message' => 'Team created successfully',
-            'data' => $team,
-        ], 201);
+            return response()->json([
+                'success' => true,
+                'message' => 'Team created successfully',
+                'data' => $team,
+            ], 201);
+        } catch (\Exception $e) {
+            DB::rollBack();
+            \Log::error("Error creating team: " . $e->getMessage());
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to create team',
+            ], 500);
+        }
     }
 
     /**
@@ -85,8 +97,6 @@ class TeamController extends Controller
      */
     public function update(Request $request, $id): JsonResponse
     {
-        $team = Team::findOrFail($id);
-
         $validated = $request->validate([
             'name' => 'string|max:255|unique:teams,name,' . $id,
             'slug' => 'string|max:255|unique:teams,slug,' . $id,
@@ -94,14 +104,31 @@ class TeamController extends Controller
             'logo' => 'nullable|url',
             'is_active' => 'boolean',
         ]);
+        $team = Team::findOrFail($id);
+        if (!$team) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Team not found',
+            ], 404);
+        }
 
-        $team->update($validated);
-
-        return response()->json([
-            'success' => true,
-            'message' => 'Team updated successfully',
-            'data' => $team,
-        ]);
+        DB::beginTransaction();
+        try {
+            $team->update($validated);
+            DB::commit();
+            return response()->json([
+                'success' => true,
+                'message' => 'Team updated successfully',
+                'data' => $team,
+            ]);
+        } catch (\Exception $e) {
+            DB::rollBack();
+            \Log::error("Error updating team {$id}: " . $e->getMessage());
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to update team',
+            ], 500);
+        }
     }
 
     /**
@@ -109,22 +136,33 @@ class TeamController extends Controller
      */
     public function destroy($id): JsonResponse
     {
-        $team = Team::findOrFail($id);
+        DB::beginTransaction();
+        try {
+            $team = Team::findOrFail($id);
 
-        // Check if team has users
-        if ($team->users()->count() > 0) {
+            // Check if team has users
+            if ($team->users()->count() > 0) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Cannot delete team with active users. Please remove all users first.',
+                ], 400);
+            }
+
+            $team->delete();
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Team deleted successfully',
+            ]);
+        } catch (\Exception $e) {
+            DB::rollBack();
+            \Log::error("Error deleting team {$id}: " . $e->getMessage());
             return response()->json([
                 'success' => false,
-                'message' => 'Cannot delete team with active users. Please remove all users first.',
-            ], 400);
+                'message' => 'Failed to delete team',
+            ], 500);
         }
-
-        $team->delete();
-
-        return response()->json([
-            'success' => true,
-            'message' => 'Team deleted successfully',
-        ]);
+            
     }
 
     /**
@@ -132,22 +170,32 @@ class TeamController extends Controller
      */
     public function restore($id): JsonResponse
     {
-        $team = Team::withTrashed()->findOrFail($id);
+        DB::beginTransaction();
+        try {
+            $team = Team::withTrashed()->findOrFail($id);
 
-        if (!$team->trashed()) {
+            if (!$team->trashed()) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Team is not deleted',
+                ], 400);
+            }
+
+            $team->restore();
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Team restored successfully',
+                'data' => $team,
+            ]);
+        } catch (\Exception $e) {
+            DB::rollBack();
+            \Log::error("Error restoring team {$id}: " . $e->getMessage());
             return response()->json([
                 'success' => false,
-                'message' => 'Team is not deleted',
-            ], 400);
+                'message' => 'Failed to restore team',
+            ], 500);
         }
-
-        $team->restore();
-
-        return response()->json([
-            'success' => true,
-            'message' => 'Team restored successfully',
-            'data' => $team,
-        ]);
     }
 
     /**
@@ -155,13 +203,23 @@ class TeamController extends Controller
      */
     public function forceDelete($id): JsonResponse
     {
-        $team = Team::withTrashed()->findOrFail($id);
-        $team->forceDelete();
+        DB::beginTransaction();
+        try {
+            $team = Team::withTrashed()->findOrFail($id);
+            $team->forceDelete();
 
-        return response()->json([
-            'success' => true,
-            'message' => 'Team permanently deleted',
-        ]);
+            return response()->json([
+                'success' => true,
+                'message' => 'Team permanently deleted',
+            ]);
+        } catch (\Exception $e) {
+            DB::rollBack();
+            \Log::error("Error permanently deleting team {$id}: " . $e->getMessage());
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to permanently delete team',
+            ], 500);
+        }
     }
 
     /**
@@ -170,7 +228,8 @@ class TeamController extends Controller
     public function getMembers($id): JsonResponse
     {
         $team = Team::findOrFail($id);
-        $members = $team->users()->with('profile', 'roles')->paginate(15);
+        $perPage = 15;
+        $members = $team->users()->with('profile', 'roles')->paginate($perPage);
 
         return response()->json([
             'success' => true,
@@ -190,33 +249,43 @@ class TeamController extends Controller
             'roles' => 'array',
         ]);
 
-        // Check if user already in team
-        $user = $team->users()->where('user_id', $validated['user_id'])->first();
-        if ($user) {
+        DB::beginTransaction();
+        try {
+            // Check if user already in team
+            $user = $team->users()->where('user_id', $validated['user_id'])->first();
+            if ($user) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'User already in this team',
+                ], 400);
+            }
+
+            // Update user's team
+            $team->users()->syncWithoutDetaching([$validated['user_id']]);
+
+            // Assign roles if provided
+            if (isset($validated['roles']) && !empty($validated['roles'])) {
+                foreach ($validated['roles'] as $role_id) {
+                    \App\Models\UserRole::create([
+                        'user_id' => $validated['user_id'],
+                        'role_id' => $role_id,
+                        'team_id' => $id,
+                    ]);
+                }
+            }
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Member added to team',
+            ]);
+        } catch (\Exception $e) {
+            DB::rollBack();
+            \Log::error("Error adding member to team {$id}: " . $e->getMessage());
             return response()->json([
                 'success' => false,
-                'message' => 'User already in this team',
-            ], 400);
+                'message' => 'Failed to add member to team',
+            ], 500);
         }
-
-        // Update user's team
-        $team->users()->syncWithoutDetaching([$validated['user_id']]);
-
-        // Assign roles if provided
-        if (isset($validated['roles']) && !empty($validated['roles'])) {
-            foreach ($validated['roles'] as $role_id) {
-                \App\Models\UserRole::create([
-                    'user_id' => $validated['user_id'],
-                    'role_id' => $role_id,
-                    'team_id' => $id,
-                ]);
-            }
-        }
-
-        return response()->json([
-            'success' => true,
-            'message' => 'Member added to team',
-        ]);
     }
 
     /**
@@ -225,16 +294,28 @@ class TeamController extends Controller
     public function removeMember($teamId, $userId): JsonResponse
     {
         $team = Team::findOrFail($teamId);
+        DB::beginTransaction();
+        try {
 
-        // Delete user roles in this team
-        \App\Models\UserRole::where('user_id', $userId)
-            ->where('team_id', $teamId)
-            ->delete();
+            // Delete user roles in this team
+            UserRole::where('user_id', $userId)
+                ->where('team_id', $teamId)
+                ->delete();
 
-        return response()->json([
-            'success' => true,
-            'message' => 'Member removed from team',
-        ]);
+            DB::commit();
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Member removed from team',
+            ]);
+        } catch (\Exception $e) {
+            DB::rollBack();
+            \Log::error("Error removing member from team {$teamId}: " . $e->getMessage());
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to remove member from team',
+            ], 500);
+        }
     }
 
     /**
@@ -242,15 +323,25 @@ class TeamController extends Controller
      */
     public function activate($id): JsonResponse
     {
-        $team = Team::findOrFail($id);
-        $team->is_active = true;
-        $team->save();
+        DB::beginTransaction();
+        try {
+            $team = Team::findOrFail($id);
+            $team->is_active = true;
+            $team->save();
 
-        return response()->json([
-            'success' => true,
-            'message' => 'Team activated',
-            'data' => $team,
-        ]);
+            return response()->json([
+                'success' => true,
+                'message' => 'Team activated',
+                'data' => $team,
+            ]);
+        } catch (\Exception $e) {
+            DB::rollBack();
+            \Log::error("Error activating team {$id}: " . $e->getMessage());
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to activate team',
+            ], 500);
+        }
     }
 
     /**
@@ -258,14 +349,26 @@ class TeamController extends Controller
      */
     public function deactivate($id): JsonResponse
     {
-        $team = Team::findOrFail($id);
-        $team->is_active = false;
-        $team->save();
+        DB::beginTransaction();
+        try {
+            $team = Team::findOrFail($id);
+            $team->is_active = false;
+            $team->save();
 
-        return response()->json([
-            'success' => true,
-            'message' => 'Team deactivated',
-            'data' => $team,
-        ]);
+            DB::commit();
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Team deactivated',
+                'data' => $team,
+            ]);
+        } catch (\Exception $e) {
+            DB::rollBack();
+            \Log::error("Error deactivating team {$id}: " . $e->getMessage());
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to deactivate team',
+            ], 500);
+        }
     }
 }

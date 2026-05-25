@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Models\Role;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 
 class RoleController extends Controller
 {
@@ -16,7 +17,7 @@ class RoleController extends Controller
 
     public function index(Request $request): JsonResponse
     {
-        $per_page = $request->get('per_page', 15);
+        $perPage = $request->get('per_page', 15);
         $search = $request->get('search', '');
 
         $query = Role::query();
@@ -26,7 +27,7 @@ class RoleController extends Controller
                 ->orWhere('slug', 'like', "%{$search}%");
         }
 
-        $roles = $query->orderBy('name')->paginate($per_page);
+        $roles = $query->orderBy('name')->paginate($perPage);
 
         return response()->json([
             'success' => true,
@@ -53,23 +54,39 @@ class RoleController extends Controller
             'is_active' => 'boolean',
         ]);
 
-        $role = Role::create([
-            'name' => $validated['name'],
-            'slug' => $validated['slug'],
-            'description' => $validated['description'] ?? null,
-            'is_active' => $validated['is_active'] ?? true,
-        ]);
+        DB::beginTransaction();
+        try {
+            $role = Role::create([
+                'name' => $validated['name'],
+                'slug' => $validated['slug'],
+                'description' => $validated['description'] ?? null,
+                'is_active' => $validated['is_active'] ?? true,
+            ]);
 
-        return response()->json([
-            'success' => true,
-            'message' => 'Role created successfully',
-            'data' => $role,
-        ], 201);
+            return response()->json([
+                'success' => true,
+                'message' => 'Role created successfully',
+                'data' => $role,
+            ], 201);
+        } catch (\Exception $e) {
+            DB::rollBack();
+            \Log::error("Error creating role: " . $e->getMessage());
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to create role',
+            ], 500);
+        }
     }
 
     public function update(Request $request, $id): JsonResponse
     {
         $role = Role::findOrFail($id);
+        if($role->trashed()) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Cannot update a deleted role',
+            ], 400);
+        }
 
         $validated = $request->validate([
             'name' => 'string|max:255|unique:roles,name,' . $id,
@@ -78,54 +95,101 @@ class RoleController extends Controller
             'is_active' => 'boolean',
         ]);
 
-        $role->update($validated);
+        DB::beginTransaction();
+         try {
+             $role->update($validated);
 
-        return response()->json([
-            'success' => true,
-            'message' => 'Role updated successfully',
-            'data' => $role,
-        ]);
+             return response()->json([
+                 'success' => true,
+                 'message' => 'Role updated successfully',
+                 'data' => $role,
+             ]);
+         } catch (\Exception $e) {
+             DB::rollBack();
+             \Log::error("Error updating role {$id}: " . $e->getMessage());
+             return response()->json([
+                 'success' => false,
+                 'message' => 'Failed to update role',
+             ], 500);
+         }
     }
 
     public function destroy($id): JsonResponse
     {
-        $role = Role::findOrFail($id);
-        $role->delete();
+        try {
+             DB::beginTransaction();
+             $role = Role::findOrFail($id);
+             if($role->trashed()) {
+                 return response()->json([
+                     'success' => false,
+                     'message' => 'Role is already deleted',
+                 ], 400);
+             }
+             $role->delete();
+             DB::commit();
 
-        return response()->json([
-            'success' => true,
-            'message' => 'Role deleted successfully',
-        ]);
+             return response()->json([
+                 'success' => true,
+                 'message' => 'Role deleted successfully',
+             ]);
+         } catch (\Exception $e) {
+             DB::rollBack();
+             \Log::error("Error deleting role {$id}: " . $e->getMessage());
+             return response()->json([
+                 'success' => false,
+                 'message' => 'Failed to delete role',
+             ], 500);
+        }
     }
 
     public function restore($id): JsonResponse
     {
-        $role = Role::withTrashed()->findOrFail($id);
+        DB::beginTransaction();
+        try {
+            $role = Role::withTrashed()->findOrFail($id);
 
-        if (!$role->trashed()) {
+            if (!$role->trashed()) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Role is not deleted',
+                ], 400);
+            }
+
+            $role->restore();
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Role restored successfully',
+                'data' => $role,
+            ]);
+        } catch (\Exception $e) {
+            DB::rollBack();
+            \Log::error("Error restoring role {$id}: " . $e->getMessage());
             return response()->json([
                 'success' => false,
-                'message' => 'Role is not deleted',
-            ], 400);
+                'message' => 'Failed to restore role',
+            ], 500);
         }
-
-        $role->restore();
-
-        return response()->json([
-            'success' => true,
-            'message' => 'Role restored successfully',
-            'data' => $role,
-        ]);
     }
 
     public function forceDelete($id): JsonResponse
     {
-        $role = Role::withTrashed()->findOrFail($id);
-        $role->forceDelete();
+        DB::beginTransaction();
+        try {
+            $role = Role::withTrashed()->findOrFail($id);
+            $role->forceDelete();
 
-        return response()->json([
-            'success' => true,
-            'message' => 'Role permanently deleted',
-        ]);
+            return response()->json([
+                'success' => true,
+                'message' => 'Role permanently deleted',
+            ]);
+        } catch (\Exception $e) {
+            DB::rollBack();
+            \Log::error("Error permanently deleting role {$id}: " . $e->getMessage());
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to permanently delete role',
+            ], 500);
+        }
     }
 }
